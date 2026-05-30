@@ -51,6 +51,9 @@ jobs:
       - name: Run acceptance suite
         env:
           TEST: ${{ github.event.inputs.test || '.*' }}
+          # ubuntu-latest ships the `docker compose` v2 plugin, not the standalone
+          # `docker-compose` v1 binary the harness defaults to.
+          COMPOSE_BIN: "docker compose"
         run: cd tests && go test -tags acceptance -v -timeout 90m -count=1 -run "$TEST" ./...
 
       - name: Dump cluster logs on failure

@@ -56,6 +56,9 @@ jobs:
           SOAK_DURATION: ${{ github.event.inputs.duration || '20m' }}
           SOAK_FAULT_INTERVAL: ${{ github.event.inputs.fault_interval || '60s' }}
           SOAK_BATCH_SIZE: ${{ github.event.inputs.batch_size || '150' }}
+          # ubuntu-latest ships the `docker compose` v2 plugin, not the standalone
+          # `docker-compose` v1 binary the harness defaults to.
+          COMPOSE_BIN: "docker compose"
         run: cd tests && go test -tags soak -v -timeout 90m -count=1 -run TestSoak_ChaosExactlyOnce ./...
 
       - name: Dump cluster logs on failure
