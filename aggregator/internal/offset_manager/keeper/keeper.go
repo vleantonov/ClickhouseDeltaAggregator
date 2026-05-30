@@ -36,15 +36,6 @@ func (m *KeeperOffsetManager) getPartitionPath(partition int64) string {
 	return path.Join(m.root, strconv.Itoa(int(partition)))
 }
 
-func (m *KeeperOffsetManager) Prepare(partition int64) error {
-	// Think about sync call minimization
-	_, err := m.conn.Sync(m.getPartitionPath(partition))
-	if err != nil {
-		return fmt.Errorf("can't prepare keeper offset manager: %w", err)
-	}
-	return nil
-}
-
 func (m KeeperOffsetManager) StoreRangeOffsetState(partition int64, r offsetmanager.RangeOffsetState) error {
 
 	exists, _, err := m.conn.Exists(m.root)

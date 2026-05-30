@@ -66,21 +66,6 @@ func (d *Docker) KillService(ctx context.Context, service string) error {
 	return err
 }
 
-// ServiceContainerID resolves a compose service to its container id (needed for
-// network operations, which the compose CLI does not expose directly).
-func (d *Docker) ServiceContainerID(ctx context.Context, service string) (string, error) {
-	out, err := d.compose(ctx, "ps", "-q", service)
-	if err != nil {
-		return "", err
-	}
-	id := strings.TrimSpace(out)
-	if id == "" {
-		return "", fmt.Errorf("no container for service %s", service)
-	}
-	// `ps -q` may list multiple lines if scaled; take the first.
-	return strings.Fields(id)[0], nil
-}
-
 // StopAllAggregators stops every consumer instance. Used at reset time so state
 // can be cleared without a live consumer racing us.
 func (d *Docker) StopAllAggregators(ctx context.Context) error {
@@ -128,38 +113,6 @@ func (d *Docker) PauseContainer(ctx context.Context, name string) error {
 func (d *Docker) UnpauseContainer(ctx context.Context, name string) error {
 	_, err := d.run(ctx, "unpause", name)
 	return err
-}
-
-// --- network partitioning ---
-
-// DisconnectFromCluster removes a container from the cluster network, severing
-// the consumer<->ClickHouse(/Keeper) path entirely.
-func (d *Docker) DisconnectFromCluster(ctx context.Context, container string) error {
-	_, err := d.run(ctx, "network", "disconnect", d.cfg.ClusterNetwork, container)
-	return err
-}
-
-// ConnectToCluster re-attaches a container to the cluster network, optionally
-// restoring its original static IP.
-func (d *Docker) ConnectToCluster(ctx context.Context, container, ip string) error {
-	args := []string{"network", "connect"}
-	if ip != "" {
-		args = append(args, "--ip", ip)
-	}
-	args = append(args, d.cfg.ClusterNetwork, container)
-	_, err := d.run(ctx, args...)
-	return err
-}
-
-// ContainerClusterIP returns a container's current IP on the cluster network so
-// it can be restored after a reconnect.
-func (d *Docker) ContainerClusterIP(ctx context.Context, container string) (string, error) {
-	tmpl := fmt.Sprintf("{{ (index .NetworkSettings.Networks %q).IPAddress }}", d.cfg.ClusterNetwork)
-	out, err := d.run(ctx, "inspect", "-f", tmpl, container)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
 }
 
 // WaitContainerRunning blocks until a named container reports the "running"

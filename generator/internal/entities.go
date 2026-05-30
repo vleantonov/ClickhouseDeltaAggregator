@@ -1,12 +1,10 @@
 package internal
 
 import (
-	"encoding/json"
 	"math/rand"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ydb-platform/ydb-go-sdk/v3/topic/topicreader"
 )
 
 type Message struct {
@@ -15,10 +13,6 @@ type Message struct {
 	ProductID     string    `json:"product_id"`
 	Amount        float64   `json:"amount"`
 	Date          time.Time `json:"date"`
-}
-
-func (m *Message) UnmarshalYDBTopicMessage(data []byte) error {
-	return json.Unmarshal(data, m)
 }
 
 func GenerateConsumptionDistribution(
@@ -49,19 +43,4 @@ func GenerateConsumptionDistribution(
 	}
 
 	return
-}
-
-func GetFromYDBBatch(batch *topicreader.Batch) ([]Message, error) {
-	if len(batch.Messages) == 0 {
-		return nil, nil
-	}
-
-	messages := make([]Message, len(batch.Messages))
-	for idx, msg := range batch.Messages {
-		if err := msg.UnmarshalTo(&messages[idx]); err != nil {
-			return nil, err
-		}
-	}
-
-	return messages, nil
 }

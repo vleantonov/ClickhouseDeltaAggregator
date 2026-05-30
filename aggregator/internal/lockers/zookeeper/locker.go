@@ -110,9 +110,3 @@ func (z *ZookeeperTTLLocker) Unlock(ctx context.Context, partition int64) error 
 	z.locks.Delete(partition)
 	return nil
 }
-
-func (z *ZookeeperTTLLocker) Close(ctx context.Context) error {
-	z.logger.Info("close zookeeper locker")
-	z.locks.Stop()
-	return nil
-}
