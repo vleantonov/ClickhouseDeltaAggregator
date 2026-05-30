@@ -66,7 +66,7 @@ func TestClickhouseRepository(t *testing.T) {
 
 	conn, err := connect(allHosts[:1])
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := NewRepository(conn, slog.Default())
 

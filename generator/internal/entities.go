@@ -58,7 +58,9 @@ func GetFromYDBBatch(batch *topicreader.Batch) ([]Message, error) {
 
 	messages := make([]Message, len(batch.Messages))
 	for idx, msg := range batch.Messages {
-		msg.UnmarshalTo(&messages[idx])
+		if err := msg.UnmarshalTo(&messages[idx]); err != nil {
+			return nil, err
+		}
 	}
 
 	return messages, nil

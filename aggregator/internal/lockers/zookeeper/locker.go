@@ -19,8 +19,6 @@ type ZookeeperTTLLocker struct {
 	zk           *zk.Conn
 	baseLockPath string
 
-	maxTTL time.Duration
-
 	locks *ttlcache.Cache[int64, *zk.Lock]
 
 	logger *slog.Logger

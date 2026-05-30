@@ -60,7 +60,7 @@ func (r *Repository) PushTransactions(ctx context.Context, partitionID int64, tr
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 
 	for _, transaction := range transactions {
 		if transaction.PartitionID != partitionID {

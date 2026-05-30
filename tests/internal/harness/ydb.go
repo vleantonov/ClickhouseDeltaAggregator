@@ -116,7 +116,7 @@ func (y *YDB) Produce(ctx context.Context, ds Dataset) error {
 	if err != nil {
 		return fmt.Errorf("start writer: %w", err)
 	}
-	defer w.Close(ctx)
+	defer func() { _ = w.Close(ctx) }()
 
 	msgs := make([]topicwriter.Message, 0, len(ds.Transactions))
 	for i := range ds.Transactions {

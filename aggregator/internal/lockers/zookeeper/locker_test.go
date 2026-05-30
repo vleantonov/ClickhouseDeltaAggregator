@@ -26,6 +26,7 @@ func TestZookeeperLocker_LockUnlock(t *testing.T) {
 	assert.True(t, ok)
 
 	children, _, err := conn.Children("/locks/1")
+	require.NoError(t, err)
 	assert.NotEmpty(t, children)
 
 	slog.Default().Info("children", slog.Any("children", children))
@@ -38,6 +39,7 @@ func TestZookeeperLocker_LockUnlock(t *testing.T) {
 	assert.True(t, ok)
 
 	children, _, err = conn.Children("/locks/1")
+	require.NoError(t, err)
 	assert.Empty(t, children)
 }
 
@@ -55,6 +57,7 @@ func TestZookeeperLocker_TTLLock(t *testing.T) {
 	assert.True(t, ok)
 
 	children, _, err := conn.Children("/locks/1")
+	require.NoError(t, err)
 	assert.NotEmpty(t, children)
 
 	<-time.After(time.Second * 6)

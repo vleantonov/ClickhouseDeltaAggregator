@@ -53,7 +53,7 @@ func writer(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close(ctx)
+	defer func() { _ = db.Close(ctx) }()
 
 	rotatingFile := &lumberjack.Logger{
 		Filename:   "logs/aggregator.log",
@@ -61,7 +61,7 @@ func writer(ctx context.Context) {
 		MaxBackups: 5,   // сколько старых файлов хранить
 		MaxAge:     28,  // дней
 	}
-	defer rotatingFile.Close()
+	defer func() { _ = rotatingFile.Close() }()
 	log.SetOutput(rotatingFile)
 
 	writer, err := db.Topic().StartWriter(
@@ -134,12 +134,14 @@ func main() {
 	defer c()
 
 	log.Println("init topic")
-	db.Topic().Create(ctx, topic, topicoptions.CreateWithConsumer(topictypes.Consumer{
+	if err := db.Topic().Create(ctx, topic, topicoptions.CreateWithConsumer(topictypes.Consumer{
 		Name:      consumer,
 		Important: true,
 	}), topicoptions.CreateWithMinActivePartitions(3),
 		topicoptions.CreateWithPartitionCountLimit(10),
-	)
+	); err != nil {
+		log.Println("create topic:", err)
+	}
 
 	writer(ctx)
 }

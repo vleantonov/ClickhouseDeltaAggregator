@@ -39,7 +39,8 @@ func initZKConn() (*zk.Conn, error) {
 
 func main() {
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+	defer stop()
 
 	rotatingFile := &lumberjack.Logger{
 		Filename:   "logs/aggregator.log",
@@ -51,15 +52,12 @@ func main() {
 	handler := slog.NewTextHandler(rotatingFile, nil)
 	logger := slog.New(handler)
 
-	parCtx := context.Background()
-	parCtx, _ = signal.NotifyContext(parCtx, os.Interrupt, os.Kill)
-
 	logger.Info("init db")
 	db, err := initDB()
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close(ctx)
+	defer func() { _ = db.Close(ctx) }()
 
 	logger.Info("init reader")
 	r, err := db.Topic().StartReader(
@@ -105,12 +103,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	repository := clickhouserepo.NewRepository(conn, logger)
 
 	logger.Info("init reader")
 	appReader := reader.NewReader(r, repository, om, l, logger)
-	defer appReader.Close(ctx)
+	defer func() { _ = appReader.Close(ctx) }()
 
 	logger.Info("run reader")
 	if err := appReader.Run(ctx); err != nil {

@@ -229,12 +229,12 @@ func (r *Reader) addRecord(
 			},
 		}
 	}
-	state.RangeOffset.MinOffset = min(
-		state.RangeOffset.MinOffset,
+	state.MinOffset = min(
+		state.MinOffset,
 		uint64(record.Offset),
 	)
-	state.RangeOffset.MaxOffset = max(
-		state.RangeOffset.MaxOffset,
+	state.MaxOffset = max(
+		state.MaxOffset,
 		uint64(record.Offset),
 	)
 

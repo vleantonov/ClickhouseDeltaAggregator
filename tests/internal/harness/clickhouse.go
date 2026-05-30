@@ -153,7 +153,7 @@ func (c *CH) FetchAllTransactions(ctx context.Context) ([]StoredTransaction, err
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []StoredTransaction
 	for rows.Next() {
@@ -190,7 +190,7 @@ func (c *CH) ensureDatabase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	stmt := fmt.Sprintf(
 		"CREATE DATABASE IF NOT EXISTS %s ON CLUSTER '{cluster}' ENGINE = Replicated('/databases/%s', '{shard}', '{replica}')",
 		c.cfg.Database, c.cfg.Database,

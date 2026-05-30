@@ -76,7 +76,7 @@ func (s *ClusterPoolSuite) TestNewClusterPool() {
 
 			var hostName string
 			row := conn.QueryRow(ctx, "SELECT hostName()")
-			row.Scan(&hostName)
+			s.Require().NoError(row.Scan(&hostName))
 
 			shardsHostNames[idx] = append(shardsHostNames[idx], hostName)
 		}
@@ -113,7 +113,7 @@ func (s *ClusterPoolSuite) TestGetShardConn() {
 
 			var hostName string
 			row := conn.QueryRow(ctx, "SELECT hostName()")
-			row.Scan(&hostName)
+			s.Require().NoError(row.Scan(&hostName))
 
 			selectedShardHostNames[shard][hostName] = struct{}{}
 		}
@@ -153,7 +153,7 @@ func (s *ClusterPoolSuite) TestGetShardConn_DisabledReplicas() {
 
 			var hostName string
 			row := conn.QueryRow(ctx, "SELECT hostName()")
-			row.Scan(&hostName)
+			s.Require().NoError(row.Scan(&hostName))
 
 			selectedShardHostNames[shard][hostName] = struct{}{}
 		}
@@ -182,7 +182,7 @@ func (s *ClusterPoolSuite) TestGetShardConn_DisabledReplicas() {
 
 			var hostName string
 			row := conn.QueryRow(ctx, "SELECT hostName()")
-			row.Scan(&hostName)
+			s.Require().NoError(row.Scan(&hostName))
 
 			selectedShardHostNames[shard][hostName] = struct{}{}
 		}
@@ -190,10 +190,7 @@ func (s *ClusterPoolSuite) TestGetShardConn_DisabledReplicas() {
 
 	incompleteShardsReplicaHostNames := slices.Clone(s.shardsReplicaHostNames[0])
 	incompleteShardsReplicaHostNames = slices.DeleteFunc(incompleteShardsReplicaHostNames, func(s string) bool {
-		if s == "clickhouse-01-01" {
-			return true
-		}
-		return false
+		return s == "clickhouse-01-01"
 	})
 
 	s.Require().ElementsMatch(
@@ -229,7 +226,7 @@ func (s *ClusterPoolSuite) TestGetShardMultipleConn() {
 				s.Require().NoError(conn.Ping(ctx))
 				var hostName string
 				row := conn.QueryRow(ctx, "SELECT hostName()")
-				row.Scan(&hostName)
+				s.Require().NoError(row.Scan(&hostName))
 				selectedShardHostNames[shard][hostName] = struct{}{}
 
 				s.Require().NotContains(multipleConnHostNames, hostName)
@@ -273,7 +270,7 @@ func (s *ClusterPoolSuite) TestGetShardMultipleConn_DisableReplicas() {
 				s.Require().NoError(conn.Ping(ctx))
 				var hostName string
 				row := conn.QueryRow(ctx, "SELECT hostName()")
-				row.Scan(&hostName)
+				s.Require().NoError(row.Scan(&hostName))
 				selectedShardHostNames[shard][hostName] = struct{}{}
 
 				s.Require().NotContains(multipleConnHostNames, hostName)
@@ -306,7 +303,7 @@ func (s *ClusterPoolSuite) TestGetShardMultipleConn_DisableReplicas() {
 
 				var hostName string
 				row := conn.QueryRow(ctx, "SELECT hostName()")
-				row.Scan(&hostName)
+				s.Require().NoError(row.Scan(&hostName))
 
 				selectedShardHostNames[shard][hostName] = struct{}{}
 			}
@@ -315,10 +312,7 @@ func (s *ClusterPoolSuite) TestGetShardMultipleConn_DisableReplicas() {
 
 	incompleteShardsReplicaHostNames := slices.Clone(s.shardsReplicaHostNames[0])
 	incompleteShardsReplicaHostNames = slices.DeleteFunc(incompleteShardsReplicaHostNames, func(s string) bool {
-		if s == "clickhouse-01-01" {
-			return true
-		}
-		return false
+		return s == "clickhouse-01-01"
 	})
 
 	s.Require().ElementsMatch(
