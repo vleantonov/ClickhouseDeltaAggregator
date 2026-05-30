@@ -1,0 +1,67 @@
+name: Soak Tests
+
+on:
+  schedule:
+    # Weekly, Sunday 04:00 UTC — long-running chaos + record-level reconciliation.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Chaos window (SOAK_DURATION), e.g. 20m"
+        required: false
+        default: "20m"
+      fault_interval:
+        description: "Gap between fault injections (SOAK_FAULT_INTERVAL)"
+        required: false
+        default: "60s"
+      batch_size:
+        description: "Transactions per production wave (SOAK_BATCH_SIZE)"
+        required: false
+        default: "150"
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: chaos soak (record-level exactly-once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: tests/go.sum
+
+      - name: Bring up full cluster
+        run: docker compose -f deployments/docker-compose.yaml up --build -d
+
+      - name: Map ydb host
+        run: echo "127.0.0.1 ydb" | sudo tee -a /etc/hosts
+
+      - name: Wait for ClickHouse
+        run: ./.github/scripts/wait-clickhouse.sh
+
+      - name: Initialise schema
+        run: ./.github/scripts/init-db.sh
+
+      - name: Run soak test
+        env:
+          SOAK_DURATION: ${{ github.event.inputs.duration || '20m' }}
+          SOAK_FAULT_INTERVAL: ${{ github.event.inputs.fault_interval || '60s' }}
+          SOAK_BATCH_SIZE: ${{ github.event.inputs.batch_size || '150' }}
+        run: cd tests && go test -tags soak -v -timeout 90m -count=1 -run TestSoak_ChaosExactlyOnce ./...
+
+      - name: Dump cluster logs on failure
+        if: failure()
+        run: docker compose -f deployments/docker-compose.yaml logs --tail 300
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deployments/docker-compose.yaml down -v

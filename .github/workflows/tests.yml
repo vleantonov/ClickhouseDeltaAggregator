@@ -1,0 +1,63 @@
+name: Unit & Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go test (clickhouse + keeper)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: |
+            aggregator/go.sum
+            generator/go.sum
+            tests/go.sum
+
+      # The aggregator test packages (repository/clickhouse, lockers/zookeeper,
+      # offset_manager/keeper, clients/clickhouse_cluster_pool) dial the live
+      # cluster on 127.0.0.1:901x / :918x, so they are integration tests and need
+      # the ClickHouse + Keeper stack up. We skip the Go-image builds (aggregator/
+      # generator) and YDB — none of these tests use them.
+      - name: Start ClickHouse + Keeper
+        run: |
+          docker compose -f deployments/docker-compose.yaml up -d \
+            clickhouse-01-01 clickhouse-01-02 clickhouse-01-03 \
+            clickhouse-02-01 clickhouse-02-02 clickhouse-02-03
+
+      - name: Wait for ClickHouse
+        run: ./.github/scripts/wait-clickhouse.sh
+
+      - name: Initialise schema
+        run: ./.github/scripts/init-db.sh
+
+      - name: Unit & integration tests — aggregator
+        run: cd aggregator && go test -count=1 ./...
+
+      - name: Unit & integration tests — generator
+        run: cd generator && go test -count=1 ./...
+
+      - name: Unit tests — tests harness
+        run: cd tests && go test -count=1 ./...
+
+      - name: Dump ClickHouse logs on failure
+        if: failure()
+        run: docker compose -f deployments/docker-compose.yaml logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deployments/docker-compose.yaml down -v

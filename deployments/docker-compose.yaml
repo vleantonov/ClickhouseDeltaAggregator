@@ -1,0 +1,231 @@
+version: '2.2'
+services:
+  aggregator-1:
+    restart: always
+    build: 
+      context: ../aggregator
+      dockerfile: ./Dockerfile
+    
+    depends_on:
+      - ydb
+      - clickhouse-01-01
+      - clickhouse-02-01
+    networks:
+      # aggregator_net:
+      #   ipv4_address: 192.168.9.1
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.200
+      ydb_net:
+        ipv4_address: 192.168.8.200
+    volumes:
+      - ./volumes/aggregator-1/logs:/app/logs
+  
+  aggregator-2:
+    restart: always
+    build: 
+      context: ../aggregator
+      dockerfile: ./Dockerfile
+    
+    depends_on:
+      - ydb
+      - clickhouse-01-01
+      - clickhouse-02-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.201
+      ydb_net:
+        ipv4_address: 192.168.8.201
+    volumes:
+      - ./volumes/aggregator-2/logs:/app/logs
+  
+  generator:
+    build: 
+      context: ../generator
+      dockerfile: ./Dockerfile
+    depends_on:
+      - ydb
+    networks:
+      ydb_net:
+          ipv4_address: 192.168.8.210
+    volumes:
+      - ./volumes/generator/logs:/app/logs
+    restart: no
+  ydb:
+    environment:
+      - GRPC_PORT=2135
+      - GRPC_TLS_PORT=2136
+      - YDB_USE_IN_MEMORY_PDISKS=true
+    image: ydbplatform/local-ydb:latest
+    container_name: ydb
+    ports:
+      - "2135:2135"
+      - "2136:2136"
+      - "8765:8765"
+    hostname: ydb
+    healthcheck:
+      test: /ydb -e grpc://ydb:2135 -d /local scheme ls /local
+      interval: 10s
+      retries: 10
+    networks:
+      ydb_net:
+        ipv4_address: 192.168.8.1
+    ulimits:
+      nofile:
+        soft: 90000
+        hard: 90000
+  
+  clickhouse-01-01:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-01-01
+    hostname: clickhouse-01-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.11
+    volumes:
+      - ./volumes/clickhouse-01-01/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-01-01/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9011:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-01-02:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-01-02
+    hostname: clickhouse-01-02
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.12
+    volumes:
+      - ./volumes/clickhouse-01-02/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-01-02/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8124:8123"
+      - "127.0.0.1:9012:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-01-03:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-01-03
+    hostname: clickhouse-01-03
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.13
+    volumes:
+      - ./volumes/clickhouse-01-03/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-01-03/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8125:8123"
+      - "127.0.0.1:9013:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-02-01:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-02-01
+    hostname: clickhouse-02-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.21
+    volumes:
+      - ./volumes/clickhouse-02-01/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-02-01/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8126:8123"
+      - "127.0.0.1:9021:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-02-02:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-02-02
+    hostname: clickhouse-02-02
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.22
+    volumes:
+      - ./volumes/clickhouse-02-02/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-02-02/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8127:8123"
+      - "127.0.0.1:9022:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-02-03:
+    image: "clickhouse/clickhouse-server:25.8"
+    container_name: clickhouse-02-03
+    hostname: clickhouse-02-03
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.23
+    volumes:
+      - ./volumes/clickhouse-02-03/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ./volumes/clickhouse-02-03/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    ports:
+      - "127.0.0.1:8128:8123"
+      - "127.0.0.1:9023:9000"
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-keeper-01:
+    image: "clickhouse/clickhouse-keeper:25.8-alpine"
+    container_name: clickhouse-keeper-01
+    hostname: clickhouse-keeper-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.1
+    volumes:
+      - ./volumes/clickhouse-keeper-01/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    ports:
+      - "127.0.0.1:9181:9181"
+  clickhouse-keeper-02:
+    image: "clickhouse/clickhouse-keeper:25.8-alpine"
+    container_name: clickhouse-keeper-02
+    hostname: clickhouse-keeper-02
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.2
+    volumes:
+      - ./volumes/clickhouse-keeper-02/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    ports:
+      - "127.0.0.1:9182:9181"
+  clickhouse-keeper-03:
+    image: "clickhouse/clickhouse-keeper:25.8-alpine"
+    container_name: clickhouse-keeper-03
+    hostname: clickhouse-keeper-03
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 192.168.7.3
+    volumes:
+      - ./volumes/clickhouse-keeper-03/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    ports:
+      - "127.0.0.1:9183:9181"
+networks:
+  cluster_2S_1R:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.7.0/24
+          gateway: 192.168.7.254
+
+  ydb_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.8.0/24
+          gateway: 192.168.8.254
+  aggregator_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.9.0/24
+          gateway: 192.168.9.254

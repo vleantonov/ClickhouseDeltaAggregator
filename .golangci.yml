@@ -1,0 +1,20 @@
+# Shared golangci-lint config (golangci-lint v2 format).
+# Discovered by walking up from each module dir (aggregator/, generator/, tests/),
+# so a single file lints all three Go modules consistently.
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint the acceptance/soak suites too (their files sit behind build tags).
+  build-tags:
+    - acceptance
+    - soak
+
+# Keep the default "standard" set (errcheck, govet, ineffassign, staticcheck,
+# unused) — a sensible, low-noise baseline for a study project.
+linters:
+  default: standard
+
+formatters:
+  enable:
+    - gofmt
