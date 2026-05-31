@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/ydb-platform/ydb-go-sdk/v3/topic/topicreader"
@@ -23,6 +24,15 @@ type Reader struct {
 	repository repository.Repository
 
 	logger *slog.Logger
+
+	// pendingOld accumulates replayed records for an IN_PROGRESS range that has not
+	// yet been fully redelivered (YDB may split a stored range across several reads).
+	// Keyed by partition. The range is re-pushed only once every offset in
+	// [MinOffset,MaxOffset] has been collected, so the ClickHouse dedup token (derived
+	// from the full range) matches the original attempt — re-pushing a partial
+	// sub-range would double-count (had the original insert succeeded) or drop rows
+	// (had it not). Accessed only from the single Run goroutine.
+	pendingOld map[int64][]domain.Transaction
 }
 
 func NewReader(
@@ -39,6 +49,8 @@ func NewReader(
 
 		om: om,
 		l:  l,
+
+		pendingOld: make(map[int64][]domain.Transaction),
 	}
 }
 
@@ -142,6 +154,9 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 		return nil
 	}
 
+	// Old insert: records replaying a range the offset manager already knows about.
+	// These are reconciled FIRST; only once the old range is settled do we touch the
+	// new records below.
 	if len(oldInsertRecords) > 0 {
 		r.logger.Info(
 			"validate old insert records",
@@ -154,23 +169,45 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 			return fmt.Errorf("failed to validate old insert records: %w", err)
 		}
 
-		// A COMPLETED range is already durably written to ClickHouse and recorded in
-		// the offset manager — this is a pure replay, so we must NOT re-push (and must
-		// not treat it as a gap). We only re-push when the previous attempt was left
-		// IN_PROGRESS; the ClickHouse dedup token makes that push idempotent.
 		if rangeState.State == offsetmanager.IN_PROGRESS {
+			// The previous attempt persisted IN_PROGRESS but never reached COMPLETED, so
+			// the ClickHouse insert may or may not have landed. We re-push the range — the
+			// dedup token makes that idempotent — but the token is derived from the full
+			// (MinOffset,MaxOffset), so we must re-push the WHOLE range at once. YDB may
+			// redeliver it across several reads, so accumulate the replayed records until
+			// the full range is present. Until then we deliberately do NOT commit, so an
+			// incomplete reconciliation can never be lost.
+			pending := mergePendingOld(r.pendingOld[partitionID], oldInsertRecords)
+			r.pendingOld[partitionID] = pending
+
+			if !coversFullRange(pending, rangeState.RangeOffset) {
+				r.logger.Info(
+					"in-progress range not fully redelivered yet; waiting",
+					slog.Int("have", len(pending)),
+					slog.Int("want", int(rangeState.MaxOffset-rangeState.MinOffset+1)),
+					slog.Int64("partition_id", partitionID),
+				)
+				// A contiguous batch that stops inside the range carries no new-insert
+				// records, so there is nothing else to process; wait for the remainder.
+				return nil
+			}
+
 			r.logger.Info(
-				"push old insert records",
-				slog.Int("count", len(oldInsertRecords)),
-				slog.Uint64("min_offset", oldInsertRangeState.MinOffset),
-				slog.Uint64("max_offset", oldInsertRangeState.MaxOffset),
+				"re-push in-progress range",
+				slog.Int("count", len(pending)),
+				slog.Uint64("min_offset", rangeState.MinOffset),
+				slog.Uint64("max_offset", rangeState.MaxOffset),
 				slog.Int64("partition_id", partitionID),
 			)
-			if err := r.pushAndStoreOffset(ctx, partitionID, oldInsertRecords, oldInsertRangeState); err != nil {
+			if err := r.pushAndStoreOffset(ctx, partitionID, pending, rangeState); err != nil {
 				r.logger.Error("failed to push and store offset for old insert records", slog.String("error", err.Error()))
 				return nil
 			}
+			delete(r.pendingOld, partitionID)
 		}
+		// A COMPLETED range is already durably written to ClickHouse and recorded in the
+		// offset manager — this is a pure replay, so we must NOT re-push it (and must not
+		// treat a partial redelivery as a gap). We simply skip it.
 		r.logger.Info("old insert successfully processed")
 	}
 
@@ -241,16 +278,29 @@ func (r *Reader) addRecord(
 	return append(records, record), state
 }
 
+// validateOldInsertRecords checks records that replay an already-attempted range.
+//
+// YDB does not guarantee that a redelivered batch reproduces the original batch
+// boundaries, so the replayed records may be only a *subset* of the stored range
+// rather than an exact match. We therefore only require that the records form a
+// contiguous run fully contained within the stored range — an exact boundary
+// match is NOT required and must not be treated as fatal (doing so previously
+// sent the reader into a panic/restart loop that stalled the partition). A
+// genuine gap (non-contiguous offsets) or an offset outside the stored range is
+// still rejected.
 func (r *Reader) validateOldInsertRecords(
 	records []domain.Transaction,
 	state offsetmanager.RangeOffsetState,
-	inProgressState offsetmanager.RangeOffsetState,
+	storedState offsetmanager.RangeOffsetState,
 ) error {
-	if state.MinOffset != inProgressState.MinOffset || state.MaxOffset != inProgressState.MaxOffset {
-		return fmt.Errorf("old insert state doesn't equal current in progress state")
+	if state.MinOffset < storedState.MinOffset || state.MaxOffset > storedState.MaxOffset {
+		return fmt.Errorf(
+			"old insert range [%d,%d] is not contained in stored range [%d,%d]",
+			state.MinOffset, state.MaxOffset, storedState.MinOffset, storedState.MaxOffset,
+		)
 	}
 	if len(records) != int(state.MaxOffset-state.MinOffset+1) {
-		return fmt.Errorf("old insert records count doesn't equal current in progress state")
+		return fmt.Errorf("old insert records are not contiguous")
 	}
 
 	return nil
@@ -273,6 +323,14 @@ func (r *Reader) validateNewInsertRecords(
 	return nil
 }
 
+// pushAndStoreOffset durably writes a range with a write-ahead marker:
+//
+//	IN_PROGRESS (offset manager)  →  insert (ClickHouse)  →  COMPLETED (offset manager)
+//
+// Persisting IN_PROGRESS *before* the ClickHouse insert is what makes recovery
+// possible: a crash anywhere between the marker and COMPLETED leaves a durable
+// IN_PROGRESS range that the replay path re-pushes idempotently (the ClickHouse
+// dedup token, derived from the range, turns the repeat into a no-op).
 func (r *Reader) pushAndStoreOffset(
 	ctx context.Context,
 	partitionID int64,
@@ -280,22 +338,60 @@ func (r *Reader) pushAndStoreOffset(
 	state offsetmanager.RangeOffsetState,
 ) error {
 
+	r.logger.Info("mark range in progress",
+		slog.Int64("partition_id", partitionID),
+		slog.Uint64("min_offset", state.MinOffset),
+		slog.Uint64("max_offset", state.MaxOffset),
+	)
 	state.State = offsetmanager.IN_PROGRESS
+	if err := r.om.StoreRangeOffsetState(partitionID, state); err != nil {
+		return fmt.Errorf("failed to store in-progress range state: %w", err)
+	}
+
 	r.logger.Info("push transactions", slog.Int("count", len(records)))
 	if err := r.repository.PushTransactions(ctx, partitionID, records, state.RangeOffset); err != nil {
 		return fmt.Errorf("failed to push records: %w", err)
 	}
 
-	r.logger.Info("store range state",
+	r.logger.Info("mark range completed",
 		slog.Int64("partition_id", partitionID),
-		slog.Int("state", int(state.State)),
 		slog.Uint64("min_offset", state.MinOffset),
 		slog.Uint64("max_offset", state.MaxOffset),
 	)
 	state.State = offsetmanager.COMPLETED
 	if err := r.om.StoreRangeOffsetState(partitionID, state); err != nil {
-		return fmt.Errorf("failed to store range state: %w", err)
+		return fmt.Errorf("failed to store completed range state: %w", err)
 	}
 
 	return nil
+}
+
+// mergePendingOld merges newly redelivered old-insert records into the pending
+// reconciliation buffer, de-duplicating by offset and keeping the slice sorted by
+// offset (ascending). YDB redelivers in order, but a range can be split across
+// reads and the same offset can be redelivered more than once.
+func mergePendingOld(pending, incoming []domain.Transaction) []domain.Transaction {
+	seen := make(map[uint64]struct{}, len(pending)+len(incoming))
+	merged := make([]domain.Transaction, 0, len(pending)+len(incoming))
+	for _, group := range [][]domain.Transaction{pending, incoming} {
+		for _, rec := range group {
+			if _, ok := seen[rec.Offset]; ok {
+				continue
+			}
+			seen[rec.Offset] = struct{}{}
+			merged = append(merged, rec)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Offset < merged[j].Offset })
+	return merged
+}
+
+// coversFullRange reports whether records contain every offset in [Min,Max].
+// records must be sorted ascending and free of duplicate offsets (as produced by
+// mergePendingOld), so a matching count plus matching endpoints implies the run
+// is contiguous and complete.
+func coversFullRange(records []domain.Transaction, r offsetmanager.RangeOffset) bool {
+	return len(records) == int(r.MaxOffset-r.MinOffset+1) &&
+		records[0].Offset == r.MinOffset &&
+		records[len(records)-1].Offset == r.MaxOffset
 }
