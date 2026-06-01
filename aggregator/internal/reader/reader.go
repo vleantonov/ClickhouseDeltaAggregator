@@ -126,6 +126,11 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 	var oldInsertRangeState, newInsertRangeState offsetmanager.RangeOffsetState
 
 	for idx, msg := range batch.Messages {
+
+		if rangeState.State != offsetmanager.UNKNOWN && msg.Offset < int64(rangeState.MinOffset) {
+			continue
+		}
+
 		var record domain.Transaction
 		data, err := io.ReadAll(msg)
 		if err != nil {
