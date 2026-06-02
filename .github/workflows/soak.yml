@@ -65,6 +65,27 @@ jobs:
         if: failure()
         run: docker compose -f deployments/docker-compose.yaml logs --tail 300
 
+      # The aggregators log via slog to a rotating file (logs/aggregator.log), not
+      # stdout, so `docker compose logs` only shows panics. The reader's per-batch
+      # decisions (which partition/range stalls a crash loop) live in these files,
+      # bind-mounted to the host volumes — capture them for post-mortem.
+      # lumberjack creates the files as the container's root with mode 0600, so the
+      # runner user that upload-artifact runs as cannot read them without this.
+      - name: Make aggregator logs readable
+        if: failure()
+        run: sudo chmod -R a+rX deployments/volumes/aggregator-1/logs deployments/volumes/aggregator-2/logs || true
+
+      - name: Upload aggregator logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aggregator-logs
+          path: |
+            deployments/volumes/aggregator-1/logs/
+            deployments/volumes/aggregator-2/logs/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Tear down
         if: always()
         run: docker compose -f deployments/docker-compose.yaml down -v
