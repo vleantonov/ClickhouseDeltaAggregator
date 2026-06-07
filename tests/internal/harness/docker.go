@@ -66,15 +66,58 @@ func (d *Docker) KillService(ctx context.Context, service string) error {
 	return err
 }
 
-// StopAllAggregators stops every consumer instance. Used at reset time so state
-// can be cleared without a live consumer racing us.
+// StopAllAggregators stops every consumer instance and waits until every
+// container is confirmed not running. Used at reset time so state can be
+// cleared without a live consumer racing us: docker-compose stop returns as
+// soon as the SIGTERM is delivered, but the process (and its ZooKeeper session)
+// can remain alive for several seconds afterward. Proceeding to ResetKeeperState
+// while a container is still up risks the container re-writing the znodes we
+// just deleted, leaving stale COMPLETED state that silently drops messages on
+// the next run.
 func (d *Docker) StopAllAggregators(ctx context.Context) error {
 	for _, svc := range d.cfg.AggregatorServices {
 		if err := d.StopService(ctx, svc); err != nil {
 			return err
 		}
 	}
+	for _, svc := range d.cfg.AggregatorServices {
+		if err := d.WaitServiceStopped(ctx, svc, 2*time.Minute); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// WaitServiceStopped blocks until every container belonging to a compose service
+// reports a non-running state, or the timeout elapses. It inspects the
+// container by the service name as docker-compose sees it
+// (<project>-<service>-<replica>).
+func (d *Docker) WaitServiceStopped(ctx context.Context, service string, timeout time.Duration) error {
+	// Ask compose for the container IDs it manages for this service.
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := d.compose(ctx, "ps", "-q", service)
+		if err != nil || strings.TrimSpace(out) == "" {
+			// No containers found — service is down.
+			return nil
+		}
+		ids := strings.Fields(strings.TrimSpace(out))
+		allStopped := true
+		for _, id := range ids {
+			running, _ := d.run(ctx, "inspect", "-f", "{{.State.Running}}", id)
+			if strings.TrimSpace(running) == "true" {
+				allStopped = false
+				break
+			}
+		}
+		if allStopped {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("service %s still running after %s", service, timeout)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // StartAllAggregators starts every consumer instance.

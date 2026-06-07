@@ -80,6 +80,7 @@ func (h *Harness) Produce(ctx context.Context, t *testing.T, ds Dataset) {
 // StartAggregators starts every consumer instance and ensures the suite leaves
 // them running on exit.
 func (h *Harness) StartAggregators(ctx context.Context, t *testing.T) {
+	// Helper function for simple debugging
 	t.Helper()
 	if err := h.Docker.StartAllAggregators(ctx); err != nil {
 		t.Fatalf("start aggregators: %v", err)

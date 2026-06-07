@@ -16,6 +16,8 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3/topic/topicreader"
 )
 
+const maxRetries = 3
+
 type Reader struct {
 	*topicreader.Reader
 
@@ -70,38 +72,58 @@ func (r *Reader) Run(parCtx context.Context) error {
 // for the reader loop; a nil return means "continue with the next batch" (the
 // equivalent of the previous loop's `continue`).
 func (r *Reader) processNextBatch(parCtx context.Context) error {
-	r.logger.Info("read batch")
+	r.logger.Debug("waiting for next batch")
+	readStart := time.Now()
 	batch, err := r.ReadMessagesBatch(
 		parCtx,
-		topicreader.WithBatchMaxCount(10),
+		topicreader.WithBatchMaxCount(1000),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to read batch: %w", err)
 	}
 
-	r.logger.Info("batch read", slog.Int("count", len(batch.Messages)))
-
 	if len(batch.Messages) == 0 {
+		r.logger.Debug("empty batch received", slog.Duration("read_latency", time.Since(readStart)))
 		return nil
 	}
+
+	firstOffset := batch.Messages[0].Offset
+	lastOffset := batch.Messages[len(batch.Messages)-1].Offset
+	partitionID := batch.PartitionID()
+
+	r.logger.Info("batch received",
+		slog.Int64("partition_id", partitionID),
+		slog.Int("count", len(batch.Messages)),
+		slog.Int64("first_offset", firstOffset),
+		slog.Int64("last_offset", lastOffset),
+		slog.Duration("read_latency", time.Since(readStart)),
+	)
 
 	ctx, cancel := context.WithTimeout(parCtx, 1*time.Minute)
 	defer cancel()
 
-	r.logger.Info("start batch processing", slog.Int("count", len(batch.Messages)))
-
-	partitionID := batch.PartitionID()
-	if err := r.l.TTLLock(ctx, partitionID); err != nil {
+	lockStart := time.Now()
+	r.logger.Info("acquiring partition lock", slog.Int64("partition_id", partitionID))
+	if err := r.acquireLockWithRetry(ctx, partitionID); err != nil {
 		return fmt.Errorf("failed to lock partition %d: %w", partitionID, err)
 	}
+	r.logger.Info("partition lock acquired",
+		slog.Int64("partition_id", partitionID),
+		slog.Duration("lock_latency", time.Since(lockStart)),
+	)
+
+	r.logger.Info("fetching stored range state", slog.Int64("partition_id", partitionID))
+	getRangeStart := time.Now()
 	rangeState, err := r.om.GetRangeOffsetState(partitionID)
 	if err != nil {
 		return fmt.Errorf("failed to get range state for partition %d: %w", partitionID, err)
 	}
 
 	r.logger.Info(
-		"range state",
-		slog.Int("state", int(rangeState.State)),
+		"stored range state fetched",
+		slog.Duration("duration", time.Since(getRangeStart)),
+		slog.Int64("partition_id", partitionID),
+		slog.String("state", rangeState.State.String()),
 		slog.Uint64("min_offset", rangeState.MinOffset),
 		slog.Uint64("max_offset", rangeState.MaxOffset),
 	)
@@ -152,9 +174,13 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 	}
 
 	if batch.Context().Err() != nil {
-		r.logger.Error("batch context error", slog.String("error", batch.Context().Err().Error()))
+		r.logger.Error("batch context expired after message parsing", slog.String("error", batch.Context().Err().Error()), slog.Int64("partition_id", partitionID))
+		r.logger.Info("releasing partition lock", slog.Int64("partition_id", partitionID))
+		unlockStart := time.Now()
 		if err := r.l.Unlock(ctx, partitionID); err != nil {
-			r.logger.Error("failed to unlock range state", slog.String("error", err.Error()))
+			r.logger.Error("failed to unlock partition", slog.Int64("partition_id", partitionID), slog.String("error", err.Error()))
+		} else {
+			r.logger.Info("partition lock released", slog.Int64("partition_id", partitionID), slog.Duration("duration", time.Since(unlockStart)))
 		}
 		return nil
 	}
@@ -164,11 +190,14 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 	// new records below.
 	if len(oldInsertRecords) > 0 {
 		r.logger.Info(
-			"validate old insert records",
-			slog.Int("count", len(oldInsertRecords)),
-			slog.Uint64("min_offset", oldInsertRangeState.MinOffset),
-			slog.Uint64("max_offset", oldInsertRangeState.MaxOffset),
+			"validating old insert records (replay)",
 			slog.Int64("partition_id", partitionID),
+			slog.Int("count", len(oldInsertRecords)),
+			slog.Uint64("batch_min_offset", oldInsertRangeState.MinOffset),
+			slog.Uint64("batch_max_offset", oldInsertRangeState.MaxOffset),
+			slog.String("stored_state", rangeState.State.String()),
+			slog.Uint64("stored_min_offset", rangeState.MinOffset),
+			slog.Uint64("stored_max_offset", rangeState.MaxOffset),
 		)
 		if err := r.validateOldInsertRecords(oldInsertRecords, oldInsertRangeState, rangeState); err != nil {
 			return fmt.Errorf("failed to validate old insert records: %w", err)
@@ -187,10 +216,12 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 
 			if !coversFullRange(pending, rangeState.RangeOffset) {
 				r.logger.Info(
-					"in-progress range not fully redelivered yet; waiting",
+					"in-progress range partially redelivered; accumulating",
+					slog.Int64("partition_id", partitionID),
 					slog.Int("have", len(pending)),
 					slog.Int("want", int(rangeState.MaxOffset-rangeState.MinOffset+1)),
-					slog.Int64("partition_id", partitionID),
+					slog.Uint64("stored_min_offset", rangeState.MinOffset),
+					slog.Uint64("stored_max_offset", rangeState.MaxOffset),
 				)
 				// A contiguous batch that stops inside the range carries no new-insert
 				// records, so there is nothing else to process; wait for the remainder.
@@ -198,11 +229,11 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 			}
 
 			r.logger.Info(
-				"re-push in-progress range",
+				"re-pushing complete in-progress range",
+				slog.Int64("partition_id", partitionID),
 				slog.Int("count", len(pending)),
 				slog.Uint64("min_offset", rangeState.MinOffset),
 				slog.Uint64("max_offset", rangeState.MaxOffset),
-				slog.Int64("partition_id", partitionID),
 			)
 			if err := r.pushAndStoreOffset(ctx, partitionID, pending, rangeState); err != nil {
 				r.logger.Error("failed to push and store offset for old insert records", slog.String("error", err.Error()))
@@ -213,48 +244,129 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 		// A COMPLETED range is already durably written to ClickHouse and recorded in the
 		// offset manager — this is a pure replay, so we must NOT re-push it (and must not
 		// treat a partial redelivery as a gap). We simply skip it.
-		r.logger.Info("old insert successfully processed")
+		r.logger.Info("old insert records processed",
+			slog.Int64("partition_id", partitionID),
+			slog.String("stored_state", rangeState.State.String()),
+		)
 	}
 
 	if batch.Context().Err() != nil {
-		r.logger.Error("batch context error", slog.String("error", batch.Context().Err().Error()))
+		r.logger.Error("batch context expired after old-insert processing", slog.String("error", batch.Context().Err().Error()), slog.Int64("partition_id", partitionID))
+		r.logger.Info("releasing partition lock", slog.Int64("partition_id", partitionID))
+		unlockStart := time.Now()
 		if err := r.l.Unlock(ctx, partitionID); err != nil {
-			r.logger.Error("failed to unlock range state", slog.String("error", err.Error()))
+			r.logger.Error("failed to unlock partition", slog.Int64("partition_id", partitionID), slog.String("error", err.Error()))
+		} else {
+			r.logger.Info("partition lock released", slog.Int64("partition_id", partitionID), slog.Duration("duration", time.Since(unlockStart)))
 		}
 		return nil
 	}
 
 	if len(newInsertRecords) > 0 {
 		r.logger.Info(
-			"validate new insert records",
+			"validating new insert records",
+			slog.Int64("partition_id", partitionID),
 			slog.Int("count", len(newInsertRecords)),
 			slog.Uint64("min_offset", newInsertRangeState.MinOffset),
 			slog.Uint64("max_offset", newInsertRangeState.MaxOffset),
-			slog.Int64("partition_id", partitionID),
 		)
 		if err := r.validateNewInsertRecords(newInsertRecords, newInsertRangeState, rangeState); err != nil {
 			return fmt.Errorf("failed to validate new insert: %w", err)
 		}
 
+		pushStart := time.Now()
 		r.logger.Info(
-			"push new insert records",
+			"pushing new insert records",
+			slog.Int64("partition_id", partitionID),
 			slog.Int("count", len(newInsertRecords)),
 			slog.Uint64("min_offset", newInsertRangeState.MinOffset),
 			slog.Uint64("max_offset", newInsertRangeState.MaxOffset),
-			slog.Int64("partition_id", partitionID),
 		)
 		if err := r.pushAndStoreOffset(ctx, partitionID, newInsertRecords, newInsertRangeState); err != nil {
-			r.logger.Error("failed to push and store offset for new insert records", slog.String("error", err.Error()))
-			return nil
+			return fmt.Errorf("failed to push and store offset for new insert records: %w", err)
 		}
-		r.logger.Info("new insert successfully processed")
+		r.logger.Info("new insert records committed to ClickHouse",
+			slog.Int64("partition_id", partitionID),
+			slog.Int("count", len(newInsertRecords)),
+			slog.Uint64("min_offset", newInsertRangeState.MinOffset),
+			slog.Uint64("max_offset", newInsertRangeState.MaxOffset),
+			slog.Duration("push_duration", time.Since(pushStart)),
+		)
 	}
 
-	if err := r.Commit(ctx, batch); err != nil {
-		r.logger.Error("failed to commit batch", slog.String("error", err.Error()))
+	commitStart := time.Now()
+	var commitErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		commitErr = r.Commit(ctx, batch)
+		if commitErr == nil {
+			break
+		}
+		r.logger.Warn("batch commit failed, will retry",
+			slog.Int64("partition_id", partitionID),
+			slog.Int("attempt", attempt),
+			slog.Int("max_retries", maxRetries),
+			slog.String("error", commitErr.Error()),
+		)
+		if attempt < maxRetries {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
 	}
-	r.logger.Info("batch committed", slog.Int("count", len(batch.Messages)))
+	if commitErr != nil {
+		return fmt.Errorf("commit batch failed after %d attempts: %w", maxRetries, commitErr)
+	}
+	r.logger.Info("batch offset committed to YDB",
+		slog.Int64("partition_id", partitionID),
+		slog.Int("count", len(batch.Messages)),
+		slog.Int64("first_offset", firstOffset),
+		slog.Int64("last_offset", lastOffset),
+		slog.Duration("commit_duration", time.Since(commitStart)),
+	)
 	return nil
+}
+
+// acquireLockWithRetry attempts TTLLock repeatedly until the outer ctx is done.
+// Each attempt uses a 20-second per-attempt deadline so a Keeper outage shorter
+// than that doesn't immediately exhaust the caller's 1-minute budget; we just
+// keep retrying until Keeper recovers or the budget runs out.
+func (r *Reader) acquireLockWithRetry(ctx context.Context, partitionID int64) error {
+	const attemptTimeout = 20 * time.Second
+	const backoff = 2 * time.Second
+	var attempt int
+	for {
+		attempt++
+		r.logger.Info("TTLLock attempt",
+			slog.Int64("partition_id", partitionID),
+			slog.Int("attempt", attempt),
+		)
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		attemptStart := time.Now()
+		err := r.l.TTLLock(attemptCtx, partitionID)
+		elapsed := time.Since(attemptStart)
+		cancel()
+		if err == nil {
+			r.logger.Info("TTLLock acquired",
+				slog.Int64("partition_id", partitionID),
+				slog.Int("attempt", attempt),
+				slog.Duration("duration", elapsed),
+			)
+			return nil
+		}
+		r.logger.Warn("TTLLock failed, will retry",
+			slog.Int64("partition_id", partitionID),
+			slog.Int("attempt", attempt),
+			slog.Duration("duration", elapsed),
+			slog.String("error", err.Error()),
+		)
+		// If the outer context is already done, propagate that error.
+		if ctx.Err() != nil {
+			return fmt.Errorf("lock acquire aborted: %w", ctx.Err())
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("lock acquire aborted: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
+	}
 }
 
 func (r *Reader) addRecord(
@@ -301,7 +413,8 @@ func (r *Reader) validateOldInsertRecords(
 	if state.MinOffset < storedState.MinOffset || state.MaxOffset > storedState.MaxOffset {
 		return fmt.Errorf(
 			"old insert range [%d,%d] is not contained in stored range [%d,%d]",
-			state.MinOffset, state.MaxOffset, storedState.MinOffset, storedState.MaxOffset,
+			state.MinOffset, state.MaxOffset,
+			storedState.MinOffset, storedState.MaxOffset,
 		)
 	}
 	if len(records) != int(state.MaxOffset-state.MinOffset+1) {
@@ -336,37 +449,81 @@ func (r *Reader) validateNewInsertRecords(
 // possible: a crash anywhere between the marker and COMPLETED leaves a durable
 // IN_PROGRESS range that the replay path re-pushes idempotently (the ClickHouse
 // dedup token, derived from the range, turns the repeat into a no-op).
+//
+// The whole sequence is retried up to maxRetries times on transient failure.
+// Re-marking IN_PROGRESS on a retry is safe because the state machine is
+// idempotent for that transition, and the ClickHouse dedup token makes
+// re-inserting the same range a no-op.
 func (r *Reader) pushAndStoreOffset(
 	ctx context.Context,
 	partitionID int64,
 	records []domain.Transaction,
 	state offsetmanager.RangeOffsetState,
 ) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		lastErr = r.pushAndStoreOffsetOnce(ctx, partitionID, records, state)
+		if lastErr == nil {
+			return nil
+		}
+		r.logger.Warn("pushAndStoreOffset failed, will retry",
+			slog.Int("attempt", attempt),
+			slog.Int("max_retries", maxRetries),
+			slog.Int64("partition_id", partitionID),
+			slog.String("error", lastErr.Error()),
+		)
+		if attempt < maxRetries {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+	}
+	return fmt.Errorf("pushAndStoreOffset failed after %d attempts: %w", maxRetries, lastErr)
+}
 
-	r.logger.Info("mark range in progress",
+func (r *Reader) pushAndStoreOffsetOnce(
+	ctx context.Context,
+	partitionID int64,
+	records []domain.Transaction,
+	state offsetmanager.RangeOffsetState,
+) error {
+	r.logger.Info("marking range IN_PROGRESS in keeper",
 		slog.Int64("partition_id", partitionID),
 		slog.Uint64("min_offset", state.MinOffset),
 		slog.Uint64("max_offset", state.MaxOffset),
 	)
 	state.State = offsetmanager.IN_PROGRESS
+	t0 := time.Now()
 	if err := r.om.StoreRangeOffsetState(partitionID, state); err != nil {
 		return fmt.Errorf("failed to store in-progress range state: %w", err)
 	}
+	r.logger.Info("keeper IN_PROGRESS write done", slog.Int64("partition_id", partitionID), slog.Duration("duration", time.Since(t0)))
 
-	r.logger.Info("push transactions", slog.Int("count", len(records)))
+	r.logger.Info("pushing transactions to ClickHouse",
+		slog.Int64("partition_id", partitionID),
+		slog.Int("count", len(records)),
+		slog.Uint64("min_offset", state.MinOffset),
+		slog.Uint64("max_offset", state.MaxOffset),
+	)
+	t1 := time.Now()
 	if err := r.repository.PushTransactions(ctx, partitionID, records, state.RangeOffset); err != nil {
 		return fmt.Errorf("failed to push records: %w", err)
 	}
+	r.logger.Info("ClickHouse insert done",
+		slog.Int64("partition_id", partitionID),
+		slog.Int("count", len(records)),
+		slog.Duration("duration", time.Since(t1)),
+	)
 
-	r.logger.Info("mark range completed",
+	r.logger.Info("marking range COMPLETED in keeper",
 		slog.Int64("partition_id", partitionID),
 		slog.Uint64("min_offset", state.MinOffset),
 		slog.Uint64("max_offset", state.MaxOffset),
 	)
 	state.State = offsetmanager.COMPLETED
+	t2 := time.Now()
 	if err := r.om.StoreRangeOffsetState(partitionID, state); err != nil {
 		return fmt.Errorf("failed to store completed range state: %w", err)
 	}
+	r.logger.Info("keeper COMPLETED write done", slog.Int64("partition_id", partitionID), slog.Duration("duration", time.Since(t2)))
 
 	return nil
 }

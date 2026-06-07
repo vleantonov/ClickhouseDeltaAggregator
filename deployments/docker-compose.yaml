@@ -38,18 +38,18 @@ services:
     volumes:
       - ./volumes/aggregator-2/logs:/app/logs
   
-  generator:
-    build: 
-      context: ../generator
-      dockerfile: ./Dockerfile
-    depends_on:
-      - ydb
-    networks:
-      ydb_net:
-          ipv4_address: 192.168.8.210
-    volumes:
-      - ./volumes/generator/logs:/app/logs
-    restart: no
+  # generator:
+  #   build: 
+  #     context: ../generator
+  #     dockerfile: ./Dockerfile
+  #   depends_on:
+  #     - ydb
+  #   networks:
+  #     ydb_net:
+  #         ipv4_address: 192.168.8.210
+  #   volumes:
+  #     - ./volumes/generator/logs:/app/logs
+  #   restart: no
   ydb:
     environment:
       - GRPC_PORT=2135
