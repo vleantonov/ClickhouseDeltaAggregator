@@ -87,18 +87,25 @@ func main() {
 				}
 				switch state.State {
 				case offsetmanager.COMPLETED:
-					// Skip the already-written range: start from the first unprocessed offset.
-					resp.StartFrom(int64(state.MaxOffset + 1))
+					// Resume from the durable contiguous watermark: every offset below
+					// CompletedUpTo is already in ClickHouse. This is the only crash-safe
+					// resume point — it can never sit above an un-written range.
+					resp.StartFrom(int64(state.CompletedUpTo))
 					logger.Info("partition start offset from keeper (completed)",
 						slog.Int64("partition_id", req.PartitionID),
-						slog.Uint64("start_from", state.MaxOffset+1),
+						slog.Uint64("start_from", state.CompletedUpTo),
 					)
 				case offsetmanager.IN_PROGRESS:
-					// Re-deliver the in-progress range so the recovery path can re-push it.
-					resp.StartFrom(int64(state.MinOffset))
+					// Resume from the watermark so the recovery path re-pushes the
+					// in-progress range. The watermark is the single source of truth: it is
+					// never above an un-written offset (so we can't skip) and never below
+					// YDB's committed offset (so YDB won't reject read_offset < committed).
+					// A genuine in-progress range always starts exactly at the watermark.
+					resp.StartFrom(int64(state.CompletedUpTo))
 					logger.Info("partition start offset from keeper (in-progress)",
 						slog.Int64("partition_id", req.PartitionID),
-						slog.Uint64("start_from", state.MinOffset),
+						slog.Uint64("start_from", state.CompletedUpTo),
+						slog.Uint64("in_progress_min", state.MinOffset),
 					)
 				default:
 					// UNKNOWN: let YDB use its own committed offset (no override).

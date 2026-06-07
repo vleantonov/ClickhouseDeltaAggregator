@@ -33,9 +33,28 @@ type RangeOffset struct {
 	MaxOffset uint64
 }
 
+// RangeOffsetState carries two distinct notions that must not be conflated:
+//
+//   - RangeOffset+State describe a SINGLE range and its lifecycle. The reader builds
+//     these per batch from the incoming message offsets, and the keeper reports the
+//     currently-active range here (the IN_PROGRESS attempt, or the completed prefix as
+//     a COMPLETED range) so the existing old-vs-new-insert routing keeps working.
+//   - CompletedUpTo is the durable, forward-only watermark maintained by the keeper:
+//     EVERY offset strictly below CompletedUpTo is durably in ClickHouse. It is the
+//     contiguous prefix and is the only safe place to resume reading from after a
+//     crash/rebalance.
+//
+// Separating the two is what makes offset advance crash-safe: a lost or clobbered
+// IN_PROGRESS marker can never push CompletedUpTo past an un-written range, because the
+// watermark only ever advances by contiguous extension (InProgress.Min == CompletedUpTo).
+// The reader leaves CompletedUpTo zero on the batch-local values it constructs; only the
+// keeper populates and interprets it.
 type RangeOffsetState struct {
 	RangeOffset
 	State OffsetState
+
+	// CompletedUpTo is exclusive: offsets [0, CompletedUpTo) are durably persisted.
+	CompletedUpTo uint64
 }
 
 type OffsetManager interface {
