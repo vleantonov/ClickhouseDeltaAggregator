@@ -45,4 +45,4 @@ acceptance-test:
 # injecting every fault, then compares ClickHouse content against the recorded
 # input record-by-record. Tune via SOAK_* env vars (see tests/README.md).
 soak-test:
-	cd tests && go test -tags soak -v -timeout 90m -count=1 -run TestSoak_ChaosExactlyOnce ./...
+	cd tests && go test -tags soak -v -timeout 90m -count=1 -run TestSoak_ChaosExactlyOnce ./... -v

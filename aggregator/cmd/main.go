@@ -7,6 +7,7 @@ import (
 	"delta_aggregator/internal/offset_manager/keeper"
 	"delta_aggregator/internal/reader"
 	clickhouserepo "delta_aggregator/internal/repository/clickhouse"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -74,13 +75,36 @@ func main() {
 		panic(err)
 	}
 
+	// Locker must be initialised before StartReader so the partition-start-offset
+	// callback (below) can acquire the lock before reading state from Keeper.
+	logger.Info("init locker")
+	l := zookeeper.NewZookeeperTTLLocker(zkConn, "/locks", 2*time.Minute, logger)
+
 	logger.Info("init reader")
 	r, err := db.Topic().StartReader(
 		consumer,
 		topicoptions.ReadTopic(topic),
 		topicoptions.WithReaderGetPartitionStartOffset(
-			func(_ context.Context, req topicoptions.GetPartitionStartOffsetRequest) (topicoptions.GetPartitionStartOffsetResponse, error) {
+			func(cbCtx context.Context, req topicoptions.GetPartitionStartOffsetRequest) (topicoptions.GetPartitionStartOffsetResponse, error) {
 				var resp topicoptions.GetPartitionStartOffsetResponse
+
+				// Take the partition lock before reading Keeper state so that two
+				// aggregator instances cannot concurrently determine the start offset
+				// for the same partition. The lock is released immediately after: the
+				// run loop re-acquires it exclusively before processing any batch.
+				lockCtx, lockCancel := context.WithTimeout(cbCtx, 30*time.Second)
+				defer lockCancel()
+				if err := l.TTLLock(lockCtx, req.PartitionID); err != nil {
+					return resp, fmt.Errorf("start-offset lock partition %d: %w", req.PartitionID, err)
+				}
+
+				// Sync flushes any pending writes from the leader to the follower this
+				// connection is currently talking to, so GetRangeOffsetState sees the
+				// latest committed state rather than a potentially stale local copy.
+				if _, err := zkConn.Sync("/offsets"); err != nil {
+					return resp, fmt.Errorf("keeper sync for partition %d: %w", req.PartitionID, err)
+				}
+
 				state, err := om.GetRangeOffsetState(req.PartitionID)
 				if err != nil {
 					return resp, err
@@ -114,9 +138,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-
-	logger.Info("init locker")
-	l := zookeeper.NewZookeeperTTLLocker(zkConn, "/locks", 2*time.Minute, logger)
 
 	logger.Info("init clickhouse connection")
 	conn, err := clickhouse.Open(&clickhouse.Options{

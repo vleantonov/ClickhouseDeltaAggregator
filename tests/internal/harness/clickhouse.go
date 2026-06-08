@@ -134,6 +134,27 @@ func (c *CH) WaitForDistinct(ctx context.Context, want uint64, timeout, interval
 	}
 }
 
+// SyncReplicas forces every replica of the underlying replicated tables to pull
+// the full replication log before the final content check reads them. Inserts use
+// insert_quorum=auto, so a row acked by quorum may not yet be present on a replica
+// that was down/paused during the chaos window; the round-robin verifier could then
+// hit a lagging replica and report phantom loss. SYSTEM SYNC REPLICA blocks until
+// the local replica has fetched and applied everything in the queue, so issuing it
+// ON CLUSTER makes every node converge before we read.
+//
+// It targets the local replicated tables (transactions, reports) — not the
+// Distributed tables, which have nothing to sync. The macro {cluster} is resolved
+// by the server, exactly as in the DDL.
+func (c *CH) SyncReplicas(ctx context.Context) error {
+	for _, table := range []string{"transactions", "reports"} {
+		stmt := fmt.Sprintf("SYSTEM SYNC REPLICA ON CLUSTER '{cluster}' accounting.%s", table)
+		if err := c.conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("sync replica %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
 // StoredTransaction is a row as persisted in ClickHouse, used for full
 // content-level comparison against the produced input.
 type StoredTransaction struct {

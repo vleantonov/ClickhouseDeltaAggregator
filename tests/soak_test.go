@@ -139,6 +139,15 @@ func TestSoak_ChaosExactlyOnce(t *testing.T) {
 	}
 	time.Sleep(3 * time.Second) // let any last replay/merge settle
 
+	// Force every replica to catch up on its replication queue before reading.
+	// With insert_quorum=auto a row acked by quorum may not yet be on a replica
+	// that was down/paused during the chaos window, and the round-robin verifier
+	// could otherwise read a lagging replica and report phantom loss.
+	t.Log("syncing all replicas before final content check")
+	if err := h.CH.SyncReplicas(ctx); err != nil {
+		t.Fatalf("sync replicas before verification: %v", err)
+	}
+
 	stored, err := h.CH.FetchAllTransactions(ctx)
 	if err != nil {
 		t.Fatalf("fetch all transactions: %v", err)
@@ -379,15 +388,20 @@ func compareContent(t *testing.T, produced map[string]harness.Transaction, produ
 	}
 
 	var missing []string
-	for id := range produced {
-		if seen[id] == 0 && len(missing) < 10 {
-			missing = append(missing, id)
-		}
-	}
+	var missingMin, missingMax string
 	missingTotal := 0
 	for id := range produced {
 		if seen[id] == 0 {
 			missingTotal++
+			if len(missing) < 10 {
+				missing = append(missing, id)
+			}
+			if missingMin == "" || id < missingMin {
+				missingMin = id
+			}
+			if id > missingMax {
+				missingMax = id
+			}
 		}
 	}
 	duplicateTotal := 0
@@ -401,7 +415,8 @@ func compareContent(t *testing.T, produced map[string]harness.Transaction, produ
 		len(produced), len(stored), len(seen), producedSum, storedSum)
 
 	if missingTotal > 0 {
-		t.Errorf("LOSS: %d produced transactions missing from ClickHouse (e.g. %v)", missingTotal, missing)
+		t.Logf("missing key range: [%s, %s]", missingMin, missingMax)
+		t.Errorf("LOSS: %d produced transactions missing from ClickHouse; key range [%s, %s] (e.g. %v)", missingTotal, missingMin, missingMax, missing)
 	}
 	if duplicateTotal > 0 {
 		t.Errorf("DOUBLE-WRITE: %d duplicate rows in ClickHouse", duplicateTotal)

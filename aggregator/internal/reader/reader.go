@@ -236,8 +236,7 @@ func (r *Reader) processNextBatch(parCtx context.Context) error {
 				slog.Uint64("max_offset", rangeState.MaxOffset),
 			)
 			if err := r.pushAndStoreOffset(ctx, partitionID, pending, rangeState); err != nil {
-				r.logger.Error("failed to push and store offset for old insert records", slog.String("error", err.Error()))
-				return nil
+				return fmt.Errorf("failed to push and store offset for old insert records: %w", err)
 			}
 			delete(r.pendingOld, partitionID)
 		}
